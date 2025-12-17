@@ -10,3 +10,4 @@ wheels/
 .venv
 
 assets/sample.png
+benchmark_results

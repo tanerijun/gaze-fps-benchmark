@@ -5,9 +5,12 @@ Usage:
     uv run fps-exp.py
 """
 
+import json
 import os
 import sys
 import time
+from datetime import datetime
+from pathlib import Path
 
 import cv2
 import mediapipe as mp
@@ -16,6 +19,8 @@ import torch
 import torch.nn as nn
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
+
+from system_info import get_all_info, print_system_info
 
 
 class MobileOneBlock(nn.Module):
@@ -284,21 +289,39 @@ def run_benchmark(pipeline: GazePipeline, frame: np.ndarray, num_frames: int = 1
 
     # Warmup (run a few times to ensure GPU is ready)
     print("Warming up...")
+    warmup_start = time.monotonic()
     for i in range(25):
         _ = pipeline(frame)
-    print("Warmup complete.\n")
+    warmup_duration = time.monotonic() - warmup_start
+    print(f"Warmup complete ({warmup_duration:.2f}s).\n")
 
     # Actual benchmark
     start_time = time.monotonic()
     face_counts = []
+    frame_times = []
 
     for i in range(num_frames):
+        frame_start = time.monotonic()
         results = pipeline(frame)
+        frame_duration = time.monotonic() - frame_start
+
         face_counts.append(len(results))
+        frame_times.append(frame_duration * 1000)  # Convert to ms
         print(f"Processing frame {i + 1}/{num_frames}...", end="\r")
 
     duration = time.monotonic() - start_time
     fps = num_frames / duration
+
+    # Calculate statistics
+    min_frame_time = min(frame_times)
+    max_frame_time = max(frame_times)
+    avg_frame_time = sum(frame_times) / len(frame_times)
+
+    # Calculate percentiles
+    sorted_times = sorted(frame_times)
+    p50 = sorted_times[len(sorted_times) // 2]
+    p95 = sorted_times[int(len(sorted_times) * 0.95)]
+    p99 = sorted_times[int(len(sorted_times) * 0.99)]
 
     print(f"\n\n{'=' * 60}")
     print("BENCHMARK RESULTS")
@@ -306,19 +329,66 @@ def run_benchmark(pipeline: GazePipeline, frame: np.ndarray, num_frames: int = 1
     print(f"Total frames processed: {num_frames}")
     print(f"Total duration: {duration:.2f} seconds")
     print(f"Average FPS: {fps:.2f}")
-    print(f"Average time per frame: {(duration / num_frames) * 1000:.2f} ms")
+    print(f"Average time per frame: {avg_frame_time:.2f} ms")
+    print(f"Min frame time: {min_frame_time:.2f} ms")
+    print(f"Max frame time: {max_frame_time:.2f} ms")
+    print(f"P50 (median): {p50:.2f} ms")
+    print(f"P95: {p95:.2f} ms")
+    print(f"P99: {p99:.2f} ms")
     print(f"Faces detected per frame: {face_counts[0]} (from first frame)")
     print(f"Device: {pipeline.device}")
     print(f"{'=' * 60}\n")
 
     return {
+        "timestamp": datetime.now().isoformat(),
         "fps": fps,
         "total_frames": num_frames,
         "duration": duration,
-        "avg_frame_time_ms": (duration / num_frames) * 1000,
+        "warmup_duration": warmup_duration,
+        "avg_frame_time_ms": avg_frame_time,
+        "min_frame_time_ms": min_frame_time,
+        "max_frame_time_ms": max_frame_time,
+        "p50_frame_time_ms": p50,
+        "p95_frame_time_ms": p95,
+        "p99_frame_time_ms": p99,
         "device": str(pipeline.device),
         "faces_detected": face_counts[0],
+        "all_frame_times_ms": frame_times,
     }
+
+
+def save_benchmark_results(
+    benchmark_results: dict,
+    system_info: dict,
+    output_dir: str = "benchmark_results",
+) -> None:
+    """Save benchmark results and system info to JSON files."""
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # Save system info
+    system_info_path = output_path / f"system_info_{timestamp}.json"
+    with open(system_info_path, "w") as f:
+        json.dump(system_info, f, indent=2, default=str)
+    print(f"✓ System info saved to: {system_info_path}")
+
+    # Save benchmark results
+    benchmark_path = output_path / f"benchmark_{timestamp}.json"
+    with open(benchmark_path, "w") as f:
+        json.dump(benchmark_results, f, indent=2, default=str)
+    print(f"✓ Benchmark results saved to: {benchmark_path}")
+
+    # Save combined report
+    combined = {
+        "system_info": system_info,
+        "benchmark_results": benchmark_results,
+    }
+    combined_path = output_path / f"full_report_{timestamp}.json"
+    with open(combined_path, "w") as f:
+        json.dump(combined, f, indent=2, default=str)
+    print(f"✓ Full report saved to: {combined_path}")
 
 
 def main():
@@ -351,6 +421,10 @@ def main():
 
     print(f"Image loaded: {frame.shape[1]}x{frame.shape[0]} pixels")
 
+    # Get and print detailed system information
+    print_system_info(verbose=True)
+    system_info = get_all_info()
+
     print("\nInitializing gaze estimation pipeline...")
     pipeline = GazePipeline(
         weights_path=weights_path,
@@ -358,7 +432,7 @@ def main():
         device=device,
     )
 
-    _ = run_benchmark(pipeline, frame, num_frames=num_frames)
+    benchmark_results = run_benchmark(pipeline, frame, num_frames=num_frames)
 
     print("Running final inference to display gaze prediction...")
     final_results = pipeline(frame)
@@ -371,6 +445,10 @@ def main():
             print(f"    Yaw: {result['gaze']['yaw']:.2f}°")
     else:
         print("\nNo faces detected in the sample image.")
+
+    # Save results to JSON files
+    print("\nSaving benchmark results...")
+    save_benchmark_results(benchmark_results, system_info)
 
     print("\nBenchmark complete!")
     return 0
